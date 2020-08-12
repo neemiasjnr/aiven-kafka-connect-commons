@@ -16,7 +16,10 @@
 
 package io.aiven.kafka.connect.common.config;
 
+import io.aiven.kafka.connect.common.config.validators.TimeZoneValidator;
+import io.aiven.kafka.connect.common.config.validators.TimestampSourceValidator;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +32,7 @@ import io.aiven.kafka.connect.common.config.validators.FileCompressionTypeValida
 import io.aiven.kafka.connect.common.config.validators.OutputFieldsEncodingValidator;
 import io.aiven.kafka.connect.common.config.validators.OutputFieldsValidator;
 import io.aiven.kafka.connect.common.templating.Template;
+import org.apache.kafka.common.config.ConfigException;
 
 public class AivenCommonConfig extends AbstractConfig {
     public static final String FORMAT_OUTPUT_FIELDS_CONFIG = "format.output.fields";
@@ -38,25 +42,113 @@ public class AivenCommonConfig extends AbstractConfig {
     public static final String FILE_NAME_TIMESTAMP_TIMEZONE = "file.name.timestamp.timezone";
     public static final String FILE_NAME_TIMESTAMP_SOURCE = "file.name.timestamp.source";
     public static final String FILE_NAME_TEMPLATE_CONFIG = "file.name.template";
-
-    private static final String GROUP_AWS = "AWS";
-    private static final String GROUP_FILE = "File";
-    private static final String GROUP_FORMAT = "Format";
-    private static final String GROUP_COMPRESSION = "File Compression";
-    private static final String DEFAULT_FILENAME_TEMPLATE = "{{topic}}-{{partition}}-{{start_offset}}";
+    public static final String FILE_NAME_PREFIX_CONFIG = "file.name.prefix";
+    public static final String NAME_CONFIG = "name";
+    public static final String GROUP_AWS = "AWS";
+    public static final String GROUP_FILE = "File";
+    public static final String GROUP_FORMAT = "Format";
+    public static final String DEFAULT_FILENAME_TEMPLATE = "{{topic}}-{{partition}}-{{start_offset}}";
 
     protected AivenCommonConfig(final ConfigDef definition, final Map<?, ?> originals) {
         super(definition, originals);
     }
 
-    protected static void addOutputFieldsFormatConfigGroup(final ConfigDef configDef,
-                                                           final OutputFieldType defaultFieldType) {
+    protected static void addFileGroupConfig(final ConfigDef configDef) {
+        int fileGroupCounter = 0;
+
+        configDef.define(
+            FILE_NAME_TEMPLATE_CONFIG,
+            ConfigDef.Type.STRING,
+            null,
+            new FilenameTemplateValidator(FILE_NAME_TEMPLATE_CONFIG),
+            ConfigDef.Importance.MEDIUM,
+            "The template for file names on GCS. "
+                + "Supports `{{ variable }}` placeholders for substituting variables. "
+                + "Currently supported variables are `topic`, `partition`, and `start_offset` "
+                + "(the offset of the first record in the file). "
+                + "Only some combinations of variables are valid, which currently are:\n"
+                + "- `topic`, `partition`, `start_offset`.",
+            GROUP_FILE,
+            fileGroupCounter++,
+            ConfigDef.Width.LONG,
+            FILE_NAME_TEMPLATE_CONFIG
+        );
+
+        configDef.define(
+            FILE_COMPRESSION_TYPE_CONFIG,
+            ConfigDef.Type.STRING,
+            null,
+            new FileCompressionTypeValidator(),
+            ConfigDef.Importance.MEDIUM,
+            "The compression type used for files put on AWS. "
+                + "The supported values are: " + CompressionType.SUPPORTED_COMPRESSION_TYPES + ".",
+            GROUP_FILE,
+            fileGroupCounter++,
+            ConfigDef.Width.NONE,
+            FILE_COMPRESSION_TYPE_CONFIG,
+            FixedSetRecommender.ofSupportedValues(CompressionType.names())
+        );
+
+        configDef.define(
+            FILE_MAX_RECORDS,
+            ConfigDef.Type.INT,
+            0,
+            new ConfigDef.Validator() {
+                @Override
+                public void ensureValid(final String name, final Object value) {
+                    assert value instanceof Integer;
+                    if ((Integer) value < 0) {
+                        throw new ConfigException(
+                            FILE_MAX_RECORDS, value,
+                            "must be a non-negative integer number");
+                    }
+                }
+            },
+            ConfigDef.Importance.MEDIUM,
+            "The maximum number of records to put in a single file. "
+                + "Must be a non-negative integer number. "
+                + "0 is interpreted as \"unlimited\", which is the default.",
+            GROUP_FILE,
+            fileGroupCounter,
+            ConfigDef.Width.SHORT,
+            FILE_MAX_RECORDS
+        );
+
+        configDef.define(
+            FILE_NAME_TIMESTAMP_TIMEZONE,
+            ConfigDef.Type.STRING,
+            ZoneOffset.UTC.toString(),
+            new TimeZoneValidator(),
+            ConfigDef.Importance.LOW,
+            "Specifies the timezone in which the dates and time for the timestamp variable will be treated. "
+                + "Use standard shot and long names. Default is UTC",
+            GROUP_FILE,
+            fileGroupCounter++,
+            ConfigDef.Width.SHORT,
+            FILE_NAME_TIMESTAMP_TIMEZONE
+        );
+
+        configDef.define(
+            FILE_NAME_TIMESTAMP_SOURCE,
+            ConfigDef.Type.STRING,
+            TimestampSource.Type.WALLCLOCK.name(),
+            new TimestampSourceValidator(),
+            ConfigDef.Importance.LOW,
+            "Specifies the the timestamp variable source. Default is wall-clock.",
+            GROUP_FILE,
+            fileGroupCounter,
+            ConfigDef.Width.SHORT,
+            FILE_NAME_TIMESTAMP_SOURCE
+        );
+    }
+
+    protected static void addFormatGroupConfig(final ConfigDef configDef) {
         int formatGroupCounter = 0;
 
         configDef.define(
             FORMAT_OUTPUT_FIELDS_CONFIG,
             ConfigDef.Type.LIST,
-            !Objects.isNull(defaultFieldType) ? defaultFieldType.name : null,
+            null,
             new OutputFieldsValidator(),
             ConfigDef.Importance.MEDIUM,
             "Fields to put into output files. "
@@ -75,7 +167,7 @@ public class AivenCommonConfig extends AbstractConfig {
             new OutputFieldsEncodingValidator(),
             ConfigDef.Importance.MEDIUM,
             "The type of encoding for the value field. "
-                + "The supported values are: " + OutputField.SUPPORTED_OUTPUT_FIELDS + ".",
+                + "The supported values are: " + OutputFieldEncodingType.SUPPORTED_FIELD_ENCODING_TYPES + ".",
             GROUP_FORMAT,
             formatGroupCounter,
             ConfigDef.Width.NONE,
@@ -84,23 +176,8 @@ public class AivenCommonConfig extends AbstractConfig {
         );
     }
 
-    protected static void addCompressionTypeConfig(final ConfigDef configDef,
-                                                   final CompressionType defaultCompressionType) {
-        configDef.define(
-            FILE_COMPRESSION_TYPE_CONFIG,
-            ConfigDef.Type.STRING,
-            !Objects.isNull(defaultCompressionType) ? defaultCompressionType.name : null,
-            new FileCompressionTypeValidator(),
-            ConfigDef.Importance.MEDIUM,
-            "The compression type used for files put on GCS. "
-                + "The supported values are: " + CompressionType.SUPPORTED_COMPRESSION_TYPES + ".",
-            GROUP_COMPRESSION,
-            1,
-            ConfigDef.Width.NONE,
-            FILE_COMPRESSION_TYPE_CONFIG,
-            FixedSetRecommender.ofSupportedValues(CompressionType.names())
-        );
-
+    public final String getConnectorName() {
+        return originalsStrings().get(NAME_CONFIG);
     }
 
     public CompressionType getCompressionType() {
